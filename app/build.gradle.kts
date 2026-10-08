@@ -46,6 +46,8 @@ android {
         buildConfig = true
     }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+    // JVM 단위 테스트에서 android.util.Log 등을 호출해도 예외 대신 기본값을 반환
+    testOptions { unitTests.isReturnDefaultValues = true }
 }
 
 ksp { arg("room.schemaLocation", "$projectDir/schemas") }

@@ -12,7 +12,7 @@ object RunLog {
     val lines: StateFlow<List<String>> = _lines
 
     fun log(message: String) {
-        Log.d("MacroLearn", message)
+        runCatching { Log.d("MacroLearn", message) }
         val stamp = LocalTime.now().withNano(0)
         _lines.update { (it + "$stamp $message").takeLast(MAX_LINES) }
     }
