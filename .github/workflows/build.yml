@@ -3,6 +3,8 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   assemble:
     runs-on: ubuntu-latest
@@ -16,3 +18,12 @@ jobs:
         with:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+      # 폰에서 바로 받을 수 있도록 Releases 에 최신 디버그 APK 를 게시한다 (매 빌드마다 교체)
+      - name: Publish debug APK to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete debug-latest --cleanup-tag -y || true
+          gh release create debug-latest app/build/outputs/apk/debug/app-debug.apk \
+            --prerelease --title "Debug build (latest)" \
+            --notes "Commit ${{ github.sha }} — 디버그 서명 APK" --target ${{ github.sha }}
