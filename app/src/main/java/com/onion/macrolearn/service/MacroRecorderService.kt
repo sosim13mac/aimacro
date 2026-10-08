@@ -3,6 +3,7 @@ package com.onion.macrolearn.service
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -12,14 +13,18 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
+import android.widget.LinearLayout
 import com.onion.macrolearn.data.MacroStep
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
+/** 녹화 단계: 대기(IDLE) → 앱 선택 후 시작 버튼 대기(READY) → 녹화 중(RECORDING) */
+enum class RecordPhase { IDLE, READY, RECORDING }
+
 /** UI 와 서비스가 공유하는 녹화 상태 */
 object RecorderState {
-    val recording = MutableStateFlow(false)
+    val phase = MutableStateFlow(RecordPhase.IDLE)
     val steps = MutableStateFlow<List<MacroStep>>(emptyList())
     /** STOP 이후 "동적 값이 있나요?" 다이얼로그를 띄워야 하는지 */
     val reviewPending = MutableStateFlow(false)
@@ -40,9 +45,17 @@ object RecorderState {
  */
 class MacroRecorderService : AccessibilityService() {
 
-    private var overlay: Button? = null
+    private var overlay: LinearLayout? = null
+    private var overlayMain: Button? = null
     private var lastClickKey: String? = null
     private var lastClickAt = 0L
+
+    /** 홈 런처 패키지들 — 실행 중 이쪽으로 전환되면 홈 버튼을 누른 것으로 본다 */
+    private val homePackages: Set<String> by lazy {
+        packageManager.queryIntentActivities(
+            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), PackageManager.MATCH_DEFAULT_ONLY,
+        ).map { it.activityInfo.packageName }.toSet() - "android"
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -63,8 +76,15 @@ class MacroRecorderService : AccessibilityService() {
         // 우리 앱(STOP 버튼, 앱 화면) 이벤트는 녹화/전환 감지에서 제외
         if (event.packageName == packageName) return
         when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> windowChangeCount++
-            AccessibilityEvent.TYPE_VIEW_CLICKED -> if (RecorderState.recording.value) capture(event)
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                windowChangeCount++
+                if (event.packageName?.toString() in homePackages) RunControl.notifyHome()
+            }
+            // 선택한 앱에서, 녹화 시작 버튼을 누른 이후의 클릭만 기록한다
+            AccessibilityEvent.TYPE_VIEW_CLICKED ->
+                if (RecorderState.phase.value == RecordPhase.RECORDING &&
+                    event.packageName?.toString() == RecorderState.targetPackage.value
+                ) capture(event)
         }
     }
 
@@ -87,28 +107,48 @@ class MacroRecorderService : AccessibilityService() {
             viewId != null -> MacroStep.FIND_ID to viewId
             else -> MacroStep.FIND_BOUNDS to bounds
         }
-        if (RecorderState.targetPackage.value == null) {
-            RecorderState.targetPackage.value = event.packageName?.toString()
-        }
         RecorderState.steps.value += MacroStep(
             findBy = findBy, value = value, fallback = desc,
             text = text?.takeIf { it.isNotBlank() }, viewId = viewId, bounds = bounds,
         )
     }
 
-    fun startRecording() {
+    /** 앱을 먼저 선택한 뒤 호출: 대상 앱을 열고 "녹화 시작" 플로팅 버튼을 띄운다. */
+    fun prepareRecording(pkg: String): Boolean {
+        val launch = packageManager.getLaunchIntentForPackage(pkg) ?: return false
         RecorderState.steps.value = emptyList()
-        RecorderState.targetPackage.value = null
         RecorderState.reviewPending.value = false
-        RecorderState.recording.value = true
-        showStopButton()
+        RecorderState.targetPackage.value = pkg
+        RecorderState.phase.value = RecordPhase.READY
+        showOverlay()
+        if (overlay == null) return false // 오버레이 권한 없음
+        startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+        return true
+    }
+
+    /** 플로팅 버튼의 "녹화 시작" — 이 시점부터 클릭이 기록된다 */
+    private fun beginCapture() {
+        lastClickKey = null
+        RecorderState.phase.value = RecordPhase.RECORDING
+        overlayMain?.apply {
+            text = "■ STOP"
+            setBackgroundColor(Color.parseColor("#D32F2F"))
+        }
+    }
+
+    /** 준비 상태 취소(✕) */
+    private fun cancelReady() {
+        hideOverlay()
+        RecorderState.phase.value = RecordPhase.IDLE
+        RecorderState.targetPackage.value = null
     }
 
     fun stopRecording(openApp: Boolean = true) {
-        if (!RecorderState.recording.value) return
-        RecorderState.recording.value = false
-        hideStopButton()
-        RecorderState.reviewPending.value = RecorderState.steps.value.isNotEmpty()
+        if (RecorderState.phase.value == RecordPhase.IDLE) return
+        val wasRecording = RecorderState.phase.value == RecordPhase.RECORDING
+        RecorderState.phase.value = RecordPhase.IDLE
+        hideOverlay()
+        RecorderState.reviewPending.value = wasRecording && RecorderState.steps.value.isNotEmpty()
         if (openApp) {
             packageManager.getLaunchIntentForPackage(packageName)?.let {
                 it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
@@ -117,15 +157,28 @@ class MacroRecorderService : AccessibilityService() {
         }
     }
 
-    // ---- 플로팅 STOP 버튼 ----
+    // ---- 플로팅 컨트롤 (녹화 시작 / STOP) ----
 
-    private fun showStopButton() {
+    private fun showOverlay() {
         if (overlay != null) return
-        val button = Button(this).apply {
-            text = "■ STOP"
+        val main = Button(this).apply {
+            text = "● 녹화 시작"
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#D32F2F"))
-            setOnClickListener { stopRecording() }
+            setBackgroundColor(Color.parseColor("#1976D2"))
+            setOnClickListener {
+                if (RecorderState.phase.value == RecordPhase.READY) beginCapture() else stopRecording()
+            }
+        }
+        val cancel = Button(this).apply {
+            text = "✕"
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#616161"))
+            setOnClickListener { if (RecorderState.phase.value == RecordPhase.RECORDING) stopRecording() else cancelReady() }
+        }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(main)
+            addView(cancel)
         }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -137,14 +190,15 @@ class MacroRecorderService : AccessibilityService() {
             gravity = Gravity.TOP or Gravity.END
             y = 200
         }
-        runCatching { getSystemService(WindowManager::class.java).addView(button, params) }
-            .onSuccess { overlay = button }
-            .onFailure { RecorderState.recording.value = false } // 오버레이 권한 없음
+        runCatching { getSystemService(WindowManager::class.java).addView(panel, params) }
+            .onSuccess { overlay = panel; overlayMain = main }
+            .onFailure { RecorderState.phase.value = RecordPhase.IDLE } // 오버레이 권한 없음
     }
 
-    private fun hideStopButton() {
+    private fun hideOverlay() {
         overlay?.let { runCatching { getSystemService(WindowManager::class.java).removeView(it) } }
         overlay = null
+        overlayMain = null
     }
 
     // ---- 실행기용 API ----

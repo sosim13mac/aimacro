@@ -43,6 +43,9 @@ object Notifier {
     fun reportSuccess(ctx: Context, macroName: String) =
         notifyAlert(ctx, "매크로 완료", "$macroName 실행을 마쳤습니다.")
 
+    fun reportCancelled(ctx: Context, macroName: String) =
+        notifyAlert(ctx, "매크로 취소됨", "$macroName — 홈 버튼을 눌러 실행을 중단했습니다.")
+
     private fun notifyAlert(ctx: Context, title: String, text: String) {
         ensureChannels(ctx)
         val nm = NotificationManagerCompat.from(ctx)

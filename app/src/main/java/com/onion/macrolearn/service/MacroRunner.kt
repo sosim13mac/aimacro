@@ -7,11 +7,20 @@ import com.onion.macrolearn.ai.LayaClient
 import com.onion.macrolearn.data.Macro
 import com.onion.macrolearn.data.MacroStep
 import com.onion.macrolearn.util.Notifier
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 
 sealed interface RunResult {
     data object Success : RunResult
+    /** 사용자가 홈 버튼을 눌러 중단 */
+    data object Cancelled : RunResult
     data class Failed(val stepNo: Int, val reason: String) : RunResult
 }
 
@@ -25,13 +34,35 @@ class MacroRunner(
     private val laya: LayaClient = LayaClient(),
 ) {
 
-    suspend fun run(macro: Macro): RunResult {
+    /** 실행 중 홈 버튼(홈 런처로의 전환)이 감지되면 즉시 취소한다. */
+    suspend fun run(macro: Macro): RunResult = coroutineScope {
+        val body = async { runSteps(macro) }
+        // UNDISPATCHED: 신호 수집이 확실히 시작된 뒤 본문이 진행되도록
+        val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            RunControl.homePressed.first()
+            body.cancel(CancellationException("홈 버튼으로 취소"))
+        }
+        try {
+            body.await()
+        } catch (e: CancellationException) {
+            // 바깥 코루틴이 취소된 게 아니라 홈 버튼으로 body 만 취소된 경우
+            if (!isActive) throw e
+            Notifier.reportCancelled(context, macro.name)
+            RunResult.Cancelled
+        } finally {
+            watcher.cancel()
+            RunControl.armed = false
+        }
+    }
+
+    private suspend fun runSteps(macro: Macro): RunResult {
         // 동시에 두 매크로가 화면을 조작하지 않도록 직렬화
         if (!lock.tryLock()) return RunResult.Failed(0, "다른 매크로가 실행 중입니다")
         try {
             val svc = MacroRecorderService.instance
                 ?: return fail(macro, 0, "접근성 서비스가 꺼져 있습니다")
             launchTargetApp(svc, macro)
+            RunControl.armed = true // 이후 홈으로 나가면 취소
             macro.steps.forEachIndexed { i, step ->
                 if (!runStep(svc, step)) return fail(macro, i + 1, "'${describe(step)}' 을(를) ${MAX_ATTEMPTS}회 시도했지만 실패")
             }
