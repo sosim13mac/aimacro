@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">MacroLearn</string>
+    <string name="accessibility_label">MacroLearn 매크로</string>
+    <string name="accessibility_description">화면의 클릭을 기록하고, 저장된 매크로를 자동으로 실행하기 위해 사용합니다.</string>
+</resources>
