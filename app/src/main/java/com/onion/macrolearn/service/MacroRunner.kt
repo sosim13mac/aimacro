@@ -4,9 +4,11 @@ import android.content.Context
 import android.content.Intent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.onion.macrolearn.ai.LayaClient
+import com.onion.macrolearn.ai.LayaConfig
 import com.onion.macrolearn.data.Macro
 import com.onion.macrolearn.data.MacroStep
 import com.onion.macrolearn.util.Notifier
+import com.onion.macrolearn.util.RunLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
@@ -59,12 +61,13 @@ class MacroRunner(
         // 동시에 두 매크로가 화면을 조작하지 않도록 직렬화
         if (!lock.tryLock()) return RunResult.Failed(0, "다른 매크로가 실행 중입니다")
         try {
+            RunLog.log("매크로 '${macro.name}' 시작 (스텝 ${macro.steps.size}개, 앱=${macro.targetPackage ?: "현재 화면"}, Laya=${LayaConfig.baseUrl()})")
             val svc = MacroRecorderService.instance
                 ?: return fail(macro, 0, "접근성 서비스가 꺼져 있습니다")
             launchTargetApp(svc, macro)
             RunControl.armed = true // 이후 홈으로 나가면 취소
             macro.steps.forEachIndexed { i, step ->
-                if (!runStep(svc, step)) return fail(macro, i + 1, "'${describe(step)}' 을(를) ${MAX_ATTEMPTS}회 시도했지만 실패")
+                if (!runStep(svc, step, i + 1)) return fail(macro, i + 1, "'${describe(step)}' 을(를) ${MAX_ATTEMPTS}회 시도했지만 실패")
             }
             Notifier.reportSuccess(context, macro.name)
             return RunResult.Success
@@ -74,6 +77,7 @@ class MacroRunner(
     }
 
     private fun fail(macro: Macro, stepNo: Int, reason: String): RunResult {
+        RunLog.log("실패: ${stepNo}번째 스텝 — $reason")
         Notifier.reportFailure(context, macro.name, stepNo, reason)
         return RunResult.Failed(stepNo, reason)
     }
@@ -86,27 +90,37 @@ class MacroRunner(
     }
 
     /** 한 스텝을 최대 [MAX_ATTEMPTS]회 시도. 성공(또는 건너뜀) 시 true */
-    private suspend fun runStep(svc: MacroRecorderService, step: MacroStep): Boolean {
+    private suspend fun runStep(svc: MacroRecorderService, step: MacroStep, no: Int): Boolean {
         repeat(MAX_ATTEMPTS) { attempt ->
-            val root = svc.root()
-            if (root == null) { delay(RETRY_WAIT_MS); return@repeat }
-
+            RunLog.log("스텝 $no '${describe(step)}' 시도 ${attempt + 1}/$MAX_ATTEMPTS")
             // (a) 팝업 감지 — 스텝당 첫 시도에서만 수행해 호출 수를 줄인다
-            if (attempt == 0) closePopupIfNeeded(svc, root)
+            if (attempt == 0) svc.root()?.let { closePopupIfNeeded(svc, it) }
 
-            val current = svc.root() ?: return@repeat
-            val target = NodeFinder.find(current, step)
+            // 스플래시/광고 등으로 화면이 늦게 뜰 수 있어 노드가 나타날 때까지 폴링
+            val target = awaitTarget(svc, step)
             if (target != null && click(svc, target)) {
+                RunLog.log("  클릭 성공")
                 awaitScreenSettled()
                 return true
             }
             // 팝업 닫기 스텝은 팝업이 없거나 이미 위에서 닫혔을 수 있으므로 못 찾아도 통과
-            if (looksLikeCloseStep(step)) return true
+            if (looksLikeCloseStep(step)) { RunLog.log("  닫기 스텝: 대상 없음, 건너뜀"); return true }
 
             // (b) 화면이 예상과 다름 → Laya 에 대안 행동 질의
+            RunLog.log("  노드를 찾지 못함 → Laya 에 대안 질의")
             askLayaForAlternative(svc, step)
         }
         return false
+    }
+
+    private suspend fun awaitTarget(svc: MacroRecorderService, step: MacroStep): Target? {
+        val timeout = if (looksLikeCloseStep(step)) CLOSE_FIND_TIMEOUT_MS else FIND_TIMEOUT_MS
+        var waited = 0L
+        while (true) {
+            svc.root()?.let { root -> NodeFinder.find(root, step)?.let { return it } }
+            if (waited >= timeout) return null
+            delay(POLL_MS); waited += POLL_MS
+        }
     }
 
     private suspend fun click(svc: MacroRecorderService, target: Target): Boolean {
@@ -184,6 +198,9 @@ class MacroRunner(
         const val MAX_ATTEMPTS = 3
         private const val LAUNCH_WAIT_MS = 3000L
         private const val RETRY_WAIT_MS = 1500L
+        private const val FIND_TIMEOUT_MS = 8000L
+        private const val CLOSE_FIND_TIMEOUT_MS = 2000L
+        private const val POLL_MS = 500L
         private const val SETTLE_MS = 600L
         private const val WINDOW_WAIT_MS = 2000L
         private const val OPTION_WAIT = "대기"

@@ -14,6 +14,9 @@ jobs:
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v3
       - run: ./gradlew testDebugUnitTest assembleDebug
+        env:
+          # 저장소 Settings → Secrets and variables → Actions → Variables 에 LAYA_BASE_URL 등록
+          LAYA_BASE_URL: ${{ vars.LAYA_BASE_URL }}
       - uses: actions/upload-artifact@v4
         with:
           name: app-debug

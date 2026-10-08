@@ -1,7 +1,7 @@
 package com.onion.macrolearn.ai
 
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
-import com.onion.macrolearn.BuildConfig
+import com.onion.macrolearn.util.RunLog
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -45,23 +45,48 @@ interface LayaApi {
 
 /** Hugging Face Space 에 호스팅된 Laya 서버 클라이언트. */
 class LayaClient(
-    private val api: LayaApi = defaultApi(BuildConfig.LAYA_BASE_URL),
+    private val api: LayaApi = defaultApi(LayaConfig.baseUrl()),
 ) {
     /** 원시 호출. 네트워크/서버 오류는 예외로 전달된다. */
     suspend fun decide(state: String, questions: Map<String, LayaQuestion>): LayaResponse =
         api.systemOne(LayaRequest(state.take(MAX_STATE_CHARS), questions))
 
     /** noul 질문 하나를 던지고 확률이 임계값 이상일 때만 true. 오류 시 false (안전 측). */
-    suspend fun confirm(state: String, id: String, instructions: String): Boolean =
-        runCatching { decide(state, mapOf(id to LayaQuestion.noul(instructions))) }
-            .getOrNull()?.score(id)?.let { it >= CONFIDENCE_THRESHOLD } ?: false
+    suspend fun confirm(state: String, id: String, instructions: String): Boolean {
+        val res = safeDecide(state, mapOf(id to LayaQuestion.noul(instructions))) ?: return false
+        val p = res.score(id)
+        RunLog.log("Laya [$id] noul=${"%.2f".format(p)}")
+        return p >= CONFIDENCE_THRESHOLD
+    }
 
     /** choice 질문. 최고 확률이 임계값 이상일 때만 옵션을 반환한다. */
     suspend fun choose(state: String, id: String, instructions: String, options: List<String>): String? {
         if (options.isEmpty()) return null
-        val res = runCatching { decide(state, mapOf(id to LayaQuestion.choice(instructions, options))) }
-            .getOrNull() ?: return null
-        return res.best(id)?.takeIf { it.second >= CONFIDENCE_THRESHOLD && it.first in options }?.first
+        val res = safeDecide(state, mapOf(id to LayaQuestion.choice(instructions, options))) ?: return null
+        val best = res.best(id)
+        RunLog.log("Laya [$id] 선택=${best?.first} (${best?.second?.let { "%.2f".format(it) }})")
+        return best?.takeIf { it.second >= CONFIDENCE_THRESHOLD && it.first in options }?.first
+    }
+
+    /** 실패 원인을 로그로 남기고 null 반환 (매크로 진행은 막지 않는다) */
+    private suspend fun safeDecide(state: String, questions: Map<String, LayaQuestion>): LayaResponse? =
+        try {
+            decide(state, questions)
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            RunLog.log("Laya 호출 실패(${LayaConfig.baseUrl()}): ${e.javaClass.simpleName} ${e.message}")
+            null
+        }
+
+    /** 연결 테스트: 성공하면 null, 실패하면 원인 문자열 */
+    suspend fun ping(): String? = try {
+        val r = decide("연결 테스트", mapOf("ping" to LayaQuestion.noul("이 문장은 테스트인가?")))
+        if (r.answers.isEmpty()) "응답은 왔지만 answers 가 비어 있습니다" else null
+    } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        "${e.javaClass.simpleName}: ${e.message}"
     }
 
     companion object {

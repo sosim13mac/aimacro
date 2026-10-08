@@ -15,6 +15,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import android.widget.LinearLayout
 import com.onion.macrolearn.data.MacroStep
+import com.onion.macrolearn.util.RunLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -107,6 +108,7 @@ class MacroRecorderService : AccessibilityService() {
             viewId != null -> MacroStep.FIND_ID to viewId
             else -> MacroStep.FIND_BOUNDS to bounds
         }
+        RunLog.log("녹화 캡처: text=$text id=$viewId bounds=$bounds")
         RecorderState.steps.value += MacroStep(
             findBy = findBy, value = value, fallback = desc,
             text = text?.takeIf { it.isNotBlank() }, viewId = viewId, bounds = bounds,

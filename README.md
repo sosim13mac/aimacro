@@ -46,6 +46,10 @@ LAYA_BASE_URL=https://<사용자명>-laya-macro-brain.hf.space ./gradlew assembl
 # 또는 local.properties 에: LAYA_BASE_URL=https://<사용자명>-laya-macro-brain.hf.space
 ```
 
+앱 안에서도 바꿀 수 있다: `매크로` 탭 → **Laya 서버** 카드에 URL을 입력하고 **저장 후 연결 테스트**.
+**실행 로그**에서 각 스텝의 탐색/클릭 결과와 Laya 응답(확률)·실패 원인을 볼 수 있다.
+CI(GitHub Actions)로 빌드할 때는 저장소 `Settings → Secrets and variables → Actions → Variables` 에 `LAYA_BASE_URL` 을 등록한다.
+
 > **API 가정**: 이 프로젝트는 `noul` 질문(응답 `{"noul": 확률}`)과, 선택 질문을 `{"type":"choice","instructions":...,"options":[...]}` →
 > `{"answers":{id:{옵션: 확률}}}` 형태로 가정한다. 서버 스펙이 다르면 `ai/LayaClient.kt` 의 `LayaQuestion`/`LayaResponse` 만 수정하면 된다.
 > Laya 호출이 실패하면 안전 측(아무것도 하지 않음)으로 동작한다.

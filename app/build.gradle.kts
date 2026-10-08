@@ -12,7 +12,7 @@ val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
-val layaBaseUrl: String = System.getenv("LAYA_BASE_URL")
+val layaBaseUrl: String = System.getenv("LAYA_BASE_URL")?.takeIf { it.isNotBlank() }
     ?: localProps.getProperty("LAYA_BASE_URL")
     ?: (project.findProperty("LAYA_BASE_URL") as String)
 
